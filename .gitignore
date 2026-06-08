@@ -1,0 +1,30 @@
+# 环境配置（含SMTP密码等敏感信息）
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# 数据文件（较大，不提交到仓库）
+data/
+
+# 运行状态
+state.json
+
+# 日志
+logs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Claude
+.claude/
