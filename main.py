@@ -14,8 +14,14 @@ from config import (
 from logger import log
 from data_manager import fetch_new_draws, append_to_csv, append_to_json, load_data, get_latest_issue
 from analyzer import generate_predictions
-from prize_checker import check_all_predictions, has_winning, get_winning_results
+from prize_checker import check_all_predictions, has_winning, get_winning_results, calc_total_winnings
 from email_sender import send_comparison_report
+
+# ── 虚拟余额配置 ──
+INITIAL_BALANCE = 10000   # 初始虚拟额度（元）
+COST_PER_ENTRY = 2        # 每注金额（元）
+ENTRIES_PER_DRAW = 20     # 每期购买注数
+COST_PER_DRAW = COST_PER_ENTRY * ENTRIES_PER_DRAW  # 每期花费40元
 
 # ── 优雅退出 ──
 _running = True
@@ -39,8 +45,13 @@ def load_state() -> dict:
         try:
             with open(STATE_PATH, "r", encoding="utf-8") as f:
                 state = json.load(f)
+            # 兼容旧状态：缺少 balance 字段则初始化
+            if "balance" not in state:
+                state["balance"] = INITIAL_BALANCE
+                log.info(f"状态文件无余额字段，已初始化为 {INITIAL_BALANCE} 元")
             log.info(f"状态已加载: 预测目标={state.get('predict_for_issue')}, "
                      f"最后检查={state.get('last_checked_issue')}, "
+                     f"余额={state['balance']}元, "
                      f"状态={state.get('status')}")
             return state
         except Exception as e:
@@ -66,9 +77,10 @@ def _init_state() -> dict:
         "predict_for_issue": _next_issue(latest_issue) if latest_issue else "",
         "last_checked_issue": latest_issue,
         "last_check_time": datetime.now().isoformat(),
+        "balance": INITIAL_BALANCE,
         "status": "predicted",  # 需要先生成预测
     }
-    log.info(f"状态已初始化: 最后期号={latest_issue}, 下一期={state['predict_for_issue']}")
+    log.info(f"状态已初始化: 最后期号={latest_issue}, 下一期={state['predict_for_issue']}, 余额={INITIAL_BALANCE}元")
     return state
 
 
@@ -114,7 +126,7 @@ def ensure_predictions(state: dict) -> dict:
         log.warning("无历史数据，无法生成预测")
         return state
 
-    predictions = generate_predictions(records, count=10)
+    predictions = generate_predictions(records, count=20)
     if predictions:
         state["current_predictions"] = predictions
         state["predict_for_issue"] = _next_issue(get_latest_issue())
@@ -168,7 +180,8 @@ def check_and_compare(state: dict) -> dict:
                     red_str = " ".join(f"{x:02d}" for x in c["reds"])
                     hit_str = " ".join(f"{x:02d}" for x in c["hit_reds"]) if c["hit_reds"] else "无"
                     log.info(
-                        f"  第{c['index']}组: 预测红[{red_str}] 蓝[{c['blue']:02d}] | "
+                        f"  第{c['index']}组[{c.get('strategy_name', '')}]: "
+                        f"预测红[{red_str}] 蓝[{c['blue']:02d}] | "
                         f"红球命中{c['red_hits']}个[{hit_str}] 蓝球{'✅' if c['blue_hit'] else '❌'} | "
                         f"{c['prize_name']}"
                     )
@@ -182,14 +195,44 @@ def check_and_compare(state: dict) -> dict:
                 else:
                     log.info("本期未中奖")
 
-                # 5. 发送邮件报告
+                # 4.5 更新虚拟余额：扣除本期花费 + 加入中奖金额
+                old_balance = state.get("balance", INITIAL_BALANCE)
+                winnings = calc_total_winnings(comparison)
+                state["balance"] = old_balance - COST_PER_DRAW + winnings
+                log.info(
+                    f"💰 余额变动: {old_balance}元 - {COST_PER_DRAW}元(购注)"
+                    f" + {winnings}元(中奖) = {state['balance']}元"
+                )
+
+                # 5. 先生成下期预测（以便附在邮件中）
+                records = load_data()
+                next_predictions = generate_predictions(records, count=20)
+                if next_predictions:
+                    latest = get_latest_issue()
+                    state["current_predictions"] = next_predictions
+                    state["predict_for_issue"] = _next_issue(latest)
+                    state["status"] = "waiting_draw"
+                    log.info(f"下期预测已生成, 目标期号: {state['predict_for_issue']}")
+                else:
+                    log.error("下期预测生成失败")
+                    next_predictions = []
+
+                # 6. 发送邮件报告（含下期预测 + 余额信息）
                 draw_info = {
                     "issue": issue,
                     "date": date,
                     "reds": reds,
                     "blue": blue,
                 }
-                email_ok = send_comparison_report(comparison, draw_info)
+                email_ok = send_comparison_report(
+                    comparison, draw_info,
+                    next_predictions=next_predictions,
+                    next_issue=state.get("predict_for_issue", ""),
+                    balance=state["balance"],
+                    cost=COST_PER_DRAW,
+                    winnings=winnings,
+                    initial_balance=INITIAL_BALANCE,
+                )
                 if not email_ok:
                     log.warning("邮件发送失败，下次将继续尝试（但不重复发送本期报告）")
             else:
@@ -202,20 +245,20 @@ def check_and_compare(state: dict) -> dict:
         state["last_checked_issue"] = issue
         state["last_check_time"] = datetime.now().isoformat()
 
-    # 4. 如果有新的开奖已对比，生成下期预测
-    if state.get("status") == "compared" or (new_draws and state.get("predict_for_issue", "") <= new_draws[-1]["issue"]):
-        log.info("开始生成下期预测...")
-        # 重新加载数据（已追加新开奖）
-        records = load_data()
-        predictions = generate_predictions(records, count=10)
-        if predictions:
-            latest = get_latest_issue()
-            state["current_predictions"] = predictions
-            state["predict_for_issue"] = _next_issue(latest)
-            state["status"] = "waiting_draw"
-            log.info(f"下期预测已生成, 目标期号: {state['predict_for_issue']}")
-        else:
-            log.error("下期预测生成失败")
+    # 如果有新开奖但不是预测目标期号，也需要更新状态
+    if new_draws and state.get("status") != "compared":
+        if state.get("predict_for_issue", "") <= new_draws[-1]["issue"]:
+            log.info("开始生成下期预测...")
+            records = load_data()
+            predictions = generate_predictions(records, count=20)
+            if predictions:
+                latest = get_latest_issue()
+                state["current_predictions"] = predictions
+                state["predict_for_issue"] = _next_issue(latest)
+                state["status"] = "waiting_draw"
+                log.info(f"下期预测已生成, 目标期号: {state['predict_for_issue']}")
+            else:
+                log.error("下期预测生成失败")
 
     save_state(state)
     return state

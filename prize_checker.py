@@ -1,4 +1,4 @@
-"""中奖判定 — 双色球6个奖等规则"""
+"""中奖判定 — 双色球6个奖等规则 + 奖金计算"""
 
 
 # ── 中奖等级规则 ──
@@ -16,6 +16,17 @@ PRIZE_NAMES = {
     4: "四等奖",
     5: "五等奖",
     6: "六等奖",
+}
+
+# ── 奖金金额（元）──
+# 三至六等奖为固定金额，一二等奖为浮动奖金（取典型均值用于模拟）
+PRIZE_AMOUNTS = {
+    1: 5_000_000,   # 一等奖: 浮动，取典型均值约500万
+    2: 200_000,     # 二等奖: 浮动，取典型均值约20万
+    3: 3_000,       # 三等奖: 固定3000元
+    4: 200,         # 四等奖: 固定200元
+    5: 10,          # 五等奖: 固定10元
+    6: 5,           # 六等奖: 固定5元
 }
 
 
@@ -78,11 +89,12 @@ def check_all_predictions(predictions: list[dict], result: dict) -> list[dict]:
     批量判定所有预测的中奖情况
 
     参数:
-        predictions: [{"reds": [...], "blue": int}, ...]
+        predictions: [{"reds": [...], "blue": int, "reason": str, "strategy_name": str}, ...]
         result:      {"reds": [...], "blue": int}
 
     返回:
-        [{"index": int, "reds": list, "blue": int, **check_result}, ...]
+        [{"index": int, "reds": list, "blue": int, "reason": str,
+          "strategy_name": str, **check_result}, ...]
     """
     results = []
     for i, pred in enumerate(predictions, 1):
@@ -91,9 +103,20 @@ def check_all_predictions(predictions: list[dict], result: dict) -> list[dict]:
             "index": i,
             "reds": pred["reds"],
             "blue": pred["blue"],
+            "reason": pred.get("reason", ""),
+            "strategy_name": pred.get("strategy_name", ""),
             **check,
         })
     return results
+
+
+def calc_total_winnings(results: list[dict]) -> int:
+    """计算所有预测的总中奖金额（元）"""
+    total = 0
+    for r in results:
+        if r["prize_level"] and r["prize_level"] in PRIZE_AMOUNTS:
+            total += PRIZE_AMOUNTS[r["prize_level"]]
+    return total
 
 
 def has_winning(results: list[dict]) -> bool:

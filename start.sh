@@ -23,7 +23,7 @@ _start() {
     fi
 
     echo "🚀 启动双色球预测系统..."
-    nohup python main.py >> "$LOG_FILE" 2>&1 &
+    nohup python main.py > /dev/null 2>&1 &
     echo $! > "$PID_FILE"
     sleep 1
 
